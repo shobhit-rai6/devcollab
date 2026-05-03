@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "DevCollab",
+    "slug": "devcollab-rn",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0a0b0f"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.devcollab.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0b0f"
+      },
+      "package": "com.devcollab.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
