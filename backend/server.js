@@ -1,3 +1,6 @@
+// backend/server.js
+// Changes: every socket message is now saved to MongoDB via messageModel
+
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
@@ -5,6 +8,7 @@ import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import projectModel from './models/project.model.js';
+import messageModel from './models/message.model.js';   // ← NEW
 import { generateResult } from './services/ai.service.js';
 
 const port = process.env.PORT || 3000;
@@ -12,7 +16,7 @@ const port = process.env.PORT || 3000;
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: process.env.CLIENT_URL || 'http://localhost:5173', // Your frontend URL
+        origin: process.env.CLIENT_URL || 'http://localhost:5173',
         methods: ['GET', 'POST'],
         credentials: true,
         allowedHeaders: ['Authorization', 'Content-Type']
@@ -21,192 +25,153 @@ const io = new Server(server, {
     allowEIO3: true
 });
 
-// Authentication middleware
+// ── Socket auth middleware ───────────────────────────────────────────────────
 io.use(async (socket, next) => {
     try {
-        console.log('Authenticating socket...');
-        
-        // Get token from handshake auth or headers
-        const token = socket.handshake.auth?.token || 
-                     socket.handshake.headers.authorization?.split(' ')[1];
-        
+        const token = socket.handshake.auth?.token ||
+                      socket.handshake.headers.authorization?.split(' ')[1];
         const projectId = socket.handshake.query.projectId;
 
-        console.log('Project ID:', projectId);
-        console.log('Token exists:', !!token);
-
-        // Validate token
-        if (!token) {
-            return next(new Error('Authentication error: No token provided'));
-        }
-
-        // Validate projectId
-        if (!projectId) {
-            return next(new Error('Project ID is required'));
-        }
-
-        if (!mongoose.Types.ObjectId.isValid(projectId)) {
+        if (!token)     return next(new Error('Authentication error: No token'));
+        if (!projectId) return next(new Error('Project ID is required'));
+        if (!mongoose.Types.ObjectId.isValid(projectId))
             return next(new Error('Invalid projectId format'));
-        }
 
-        // Verify JWT token
         let decoded;
-        try {
-            decoded = jwt.verify(token, process.env.JWT_SECRET);
-        } catch (jwtError) {
-            console.error('JWT verification failed:', jwtError.message);
-            return next(new Error('Authentication error: Invalid token'));
-        }
+        try { decoded = jwt.verify(token, process.env.JWT_SECRET); }
+        catch (e) { return next(new Error('Authentication error: Invalid token')); }
 
-        if (!decoded) {
-            return next(new Error('Authentication error: Invalid token payload'));
-        }
-
-        // Find project
         const project = await projectModel.findById(projectId);
-        if (!project) {
-            return next(new Error('Project not found'));
-        }
+        if (!project) return next(new Error('Project not found'));
 
-        // Attach data to socket
         socket.project = project;
-        socket.user = decoded;
-        socket.roomId = project._id.toString();
-
-        console.log('Socket authenticated successfully for user:', decoded.email);
+        socket.user    = decoded;
+        socket.roomId  = project._id.toString();
         next();
-
-    } catch (error) {
-        console.error('Socket authentication error:', error);
-        next(error);
+    } catch (err) {
+        next(err);
     }
 });
 
-io.on('connection', (socket) => {
-    console.log('User connected:', socket.user?.email);
-    console.log('Room ID:', socket.roomId);
+// ── Helper: persist a message to MongoDB ────────────────────────────────────
+async function persistMessage({ projectId, sender, message, type = 'user' }) {
+    try {
+        await messageModel.create({ project: projectId, sender, message, type });
+    } catch (err) {
+        // Non-fatal — log but don't crash the socket handler
+        console.error('⚠️  Failed to persist message:', err.message);
+    }
+}
 
-    // Join the project room
+// ── Socket connection handler ────────────────────────────────────────────────
+io.on('connection', (socket) => {
+    console.log('✅ User connected:', socket.user?.email);
     socket.join(socket.roomId);
-    
-    // Notify others in the room
+
     socket.to(socket.roomId).emit('user-joined', {
         message: `${socket.user?.email} joined the project`,
         user: socket.user
     });
 
-    // Handle project messages
+    // ── Incoming project message ─────────────────────────────────────────────
     socket.on('project-message', async (data) => {
-    try {
-        console.log('Received message from:', socket.user?.email);
-        console.log('Message:', data.message);
+        try {
+            const userMsg = data.message;
+            const sender  = {
+                _id:   socket.user._id || socket.user.id || socket.user.email,
+                email: socket.user.email
+            };
 
-        const message = data.message;
-        const sender = {
-            _id: socket.user._id || socket.user.id,
-            email: socket.user.email
-        };
+            const outgoing = { message: userMsg, sender, timestamp: new Date() };
 
-        // Broadcast message to everyone in the room
-        io.to(socket.roomId).emit('project-message', {
-            message: data.message,
-            sender: sender,
-            timestamp: new Date()
-        });
+            // Broadcast to everyone in room (including sender)
+            io.to(socket.roomId).emit('project-message', outgoing);
 
-        // Check if AI is mentioned
-        const aiIsPresentInMessage = message.toLowerCase().includes('@ai');
-        
-        if (aiIsPresentInMessage) {
-            console.log('AI mentioned in message, generating response...');
-            
-            const prompt = message.replace(/@ai/gi, '').trim();
-            
-            try {
-                const result = await generateResult(prompt);
-                
-                // Parse the result to ensure it's valid
-                let aiResponse;
+            // ── Persist user message ─────────────────────────────────────────
+            await persistMessage({
+                projectId: socket.roomId,
+                sender,
+                message:   userMsg,
+                type:      'user'
+            });
+
+            // ── Handle @ai mention ───────────────────────────────────────────
+            const aiMentioned = userMsg.toLowerCase().includes('@ai');
+            if (aiMentioned) {
+                const prompt = userMsg.replace(/@ai/gi, '').trim();
+
                 try {
-                    aiResponse = JSON.parse(result);
-                } catch (e) {
-                    aiResponse = {
-                        text: result,
-                        fileTree: null
+                    const result = await generateResult(prompt);
+
+                    let aiPayload;
+                    try { aiPayload = JSON.parse(result); }
+                    catch { aiPayload = { text: result, fileTree: null }; }
+
+                    const aiResponse = {
+                        text:         aiPayload.text         || 'I processed your request',
+                        fileTree:     aiPayload.fileTree     || null,
+                        buildCommand: aiPayload.buildCommand || null,
+                        startCommand: aiPayload.startCommand || null
                     };
+
+                    const aiSender = { _id: 'ai', email: 'AI Assistant' };
+                    const aiMsg    = JSON.stringify(aiResponse);
+
+                    io.to(socket.roomId).emit('project-message', {
+                        message:   aiMsg,
+                        sender:    aiSender,
+                        timestamp: new Date()
+                    });
+
+                    // ── Persist AI message ───────────────────────────────────
+                    await persistMessage({
+                        projectId: socket.roomId,
+                        sender:    aiSender,
+                        message:   aiMsg,
+                        type:      'ai'
+                    });
+
+                } catch (aiErr) {
+                    console.error('❌ AI generation error:', aiErr.message);
+
+                    const errText = '⚠️ AI is unavailable right now. Try again in a moment.';
+                    const aiSender = { _id: 'ai', email: 'AI Assistant' };
+
+                    io.to(socket.roomId).emit('project-message', {
+                        message:   JSON.stringify({ type: 'text', content: errText }),
+                        sender:    aiSender,
+                        timestamp: new Date()
+                    });
+
+                    await persistMessage({
+                        projectId: socket.roomId,
+                        sender:    aiSender,
+                        message:   JSON.stringify({ type: 'text', content: errText }),
+                        type:      'ai'
+                    });
                 }
-
-                // Ensure the response has the expected structure
-                const formattedResponse = {
-                    text: aiResponse.text || 'I processed your request',
-                    fileTree: aiResponse.fileTree || null,
-                    buildCommand: aiResponse.buildCommand || null,
-                    startCommand: aiResponse.startCommand || null
-                };
-
-                // Send AI response to the room
-                io.to(socket.roomId).emit('project-message', {
-                    message: JSON.stringify(formattedResponse),
-                    sender: {
-                        _id: 'ai',
-                        email: 'AI Assistant'
-                    },
-                    timestamp: new Date()
-                });
-                
-                console.log('AI response sent successfully');
-                
-            } // When AI generation fails
-catch (aiError) {
-    console.error('❌ AI generation error:', aiError.message);
-    
-    // Send a clear, helpful error message
-    const errorResponse = {
-        text: "⚠️ **Google AI API Not Activated**\n\nTo use the AI feature, you need to:\n\n1. Go to https://aistudio.google.com/app/apikey\n2. Delete your current API key\n3. Create a **new** API key\n4. **Accept the Terms of Service**\n5. Copy the new key to your .env file\n6. Restart the backend server\n\nOnce you've done these steps, the AI will work!",
-        fileTree: null
-    };
-    
-    io.to(socket.roomId).emit('project-message', {
-        message: JSON.stringify(errorResponse),
-        sender: {
-            _id: 'ai',
-            email: 'AI Assistant'
-        },
-        timestamp: new Date()
-    });
-}
+            }
+        } catch (err) {
+            console.error('Error handling project-message:', err);
         }
-    } catch (error) {
-        console.error('Error handling project message:', error);
-    }
-});
+    });
 
-    // Handle disconnection
+    // ── Disconnect ───────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
-        console.log('User disconnected:', socket.user?.email);
-        
-        // Notify others
+        console.log('👋 User disconnected:', socket.user?.email);
         socket.to(socket.roomId).emit('user-left', {
             message: `${socket.user?.email} left the project`,
             user: socket.user
         });
-        
         socket.leave(socket.roomId);
     });
 
-    // Handle errors
-    socket.on('error', (error) => {
-        console.error('Socket error:', error);
-    });
+    socket.on('error', (err) => console.error('Socket error:', err));
 });
 
-server.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
-});
+server.listen(port, () => console.log(`🚀 Server running on port ${port}`));
 
-// Handle process termination
 process.on('SIGINT', () => {
-    console.log('Closing server...');
     io.close();
     server.close();
     process.exit(0);
