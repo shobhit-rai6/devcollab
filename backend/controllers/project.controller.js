@@ -1,28 +1,20 @@
+// backend/controllers/project.controller.js
 import projectModel from '../models/project.model.js';
+import messageModel from '../models/message.model.js';   // ← NEW
 import * as projectService from '../services/project.service.js';
 import userModel from '../models/user.model.js';
 import { validationResult } from 'express-validator';
 
-// ✅ FIX 1: Create project - Add owner and add creator to users array
+// ── Existing controllers (unchanged) ─────────────────────────────────────────
+
 export const createProject = async (req, res) => {
     const errors = validationResult(req);
-
-    if (!errors.isEmpty()) {
-        return res.status(400).json({ errors: errors.array() });
-    }
-
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
         const { name } = req.body;
         const loggedInUser = await userModel.findOne({ email: req.user.email });
         const userId = loggedInUser._id;
-
-        // ✅ Pass userId to service to set as owner AND add to users array
-        const newProject = await projectService.createProject({ 
-            name, 
-            userId,  // This will be used as owner AND added to users array
-            owner: userId // Explicitly pass owner
-        });
-
+        const newProject = await projectService.createProject({ name, userId, owner: userId });
         res.status(201).json(newProject);
     } catch (err) {
         console.log(err);
@@ -30,135 +22,128 @@ export const createProject = async (req, res) => {
     }
 }
 
-// ✅ FIX 2: Get all projects - Already filtered by userId (Good!)
 export const getAllProject = async (req, res) => {
     try {
-        const loggedInUser = await userModel.findOne({
-            email: req.user.email
-        });
-
-        const allUserProjects = await projectService.getAllProjectByUserId({
-            userId: loggedInUser._id
-        });
-
-        return res.status(200).json({
-            projects: allUserProjects
-        });
+        const loggedInUser = await userModel.findOne({ email: req.user.email });
+        const allUserProjects = await projectService.getAllProjectByUserId({ userId: loggedInUser._id });
+        return res.status(200).json({ projects: allUserProjects });
     } catch (err) {
         console.log(err);
         res.status(400).json({ error: err.message });
     }
 }
 
-// ✅ FIX 3: Add user to project - Only owner can add
 export const addUserToProject = async (req, res) => {
     const errors = validationResult(req);
-
-    if (!errors.isEmpty()) {
-        return res.status(400).json({ errors: errors.array() });
-    }
-
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
         const { projectId, users } = req.body;
-        const loggedInUser = await userModel.findOne({
-            email: req.user.email
-        });
-
-        // ✅ Step 1: Check if current user is the OWNER
-        const project = await projectModel.findOne({
-            _id: projectId,
-            owner: loggedInUser._id  // Only owner can add collaborators
-        });
-
-        if (!project) {
-            return res.status(403).json({ 
-                error: 'Only project owner can add collaborators' 
-            });
-        }
-
-        // ✅ Step 2: Add users to project
-        const updatedProject = await projectService.addUsersToProject({
-            projectId,
-            users,
-            userId: loggedInUser._id
-        });
-
-        return res.status(200).json({
-            project: updatedProject
-        });
+        const loggedInUser = await userModel.findOne({ email: req.user.email });
+        const project = await projectModel.findOne({ _id: projectId, owner: loggedInUser._id });
+        if (!project) return res.status(403).json({ error: 'Only project owner can add collaborators' });
+        const updatedProject = await projectService.addUsersToProject({ projectId, users, userId: loggedInUser._id });
+        return res.status(200).json({ project: updatedProject });
     } catch (err) {
         console.log(err);
         res.status(400).json({ error: err.message });
     }
 }
 
-// ✅ FIX 4: Get project by ID - Add access check
 export const getProjectById = async (req, res) => {
     const { projectId } = req.params;
-
     try {
-        const loggedInUser = await userModel.findOne({
-            email: req.user.email
-        });
-
-        // ✅ Check if user has access to this project
-        const project = await projectModel.findOne({
-            _id: projectId,
-            users: loggedInUser._id  // User must be in users array
-        });
-
-        if (!project) {
-            return res.status(404).json({ 
-                error: 'Project not found or you do not have access' 
-            });
-        }
-
-        return res.status(200).json({
-            project
-        });
+        const loggedInUser = await userModel.findOne({ email: req.user.email });
+        const project = await projectModel.findOne({ _id: projectId, users: loggedInUser._id });
+        if (!project) return res.status(404).json({ error: 'Project not found or you do not have access' });
+        return res.status(200).json({ project });
     } catch (err) {
         console.log(err);
         res.status(400).json({ error: err.message });
     }
 }
 
-// ✅ FIX 5: Update file tree - Add access check
 export const updateFileTree = async (req, res) => {
     const errors = validationResult(req);
-
-    if (!errors.isEmpty()) {
-        return res.status(400).json({ errors: errors.array() });
-    }
-
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
         const { projectId, fileTree } = req.body;
-        const loggedInUser = await userModel.findOne({
-            email: req.user.email
-        });
-
-        // ✅ Check if user has access to this project
-        const project = await projectModel.findOne({
-            _id: projectId,
-            users: loggedInUser._id  // User must be in users array
-        });
-
-        if (!project) {
-            return res.status(403).json({ 
-                error: 'You do not have access to this project' 
-            });
-        }
-
-        // ✅ Update file tree
-        const updatedProject = await projectService.updateFileTree({
-            projectId,
-            fileTree
-        });
-
-        return res.status(200).json({
-            project: updatedProject
-        });
+        const loggedInUser = await userModel.findOne({ email: req.user.email });
+        const project = await projectModel.findOne({ _id: projectId, users: loggedInUser._id });
+        if (!project) return res.status(403).json({ error: 'You do not have access to this project' });
+        const updatedProject = await projectService.updateFileTree({ projectId, fileTree });
+        return res.status(200).json({ project: updatedProject });
     } catch (err) {
         console.log(err);
         res.status(400).json({ error: err.message });
+    }
+}
+
+// ── NEW: Save messages ────────────────────────────────────────────────────────
+// POST /projects/messages
+export const saveMessages = async (req, res) => {
+    try {
+        const { projectId, messages } = req.body;
+        if (!projectId || !Array.isArray(messages) || messages.length === 0)
+            return res.status(400).json({ error: 'projectId and messages array required' });
+
+        const loggedInUser = await userModel.findOne({ email: req.user.email });
+        const project = await projectModel.findOne({ _id: projectId, users: loggedInUser._id });
+        if (!project) return res.status(403).json({ error: 'Access denied' });
+
+        const docs = messages.map(m => ({
+            project: projectId,
+            sender:  m.sender,
+            message: m.message,
+            type:    m.sender?._id === 'ai' ? 'ai' : 'user'
+        }));
+
+        await messageModel.insertMany(docs, { ordered: false });
+        return res.status(200).json({ saved: docs.length });
+    } catch (err) {
+        console.error('saveMessages error:', err);
+        res.status(500).json({ error: err.message });
+    }
+}
+
+// ── NEW: Get chat history ─────────────────────────────────────────────────────
+// GET /projects/:projectId/messages
+export const getMessages = async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        const limit = Math.min(parseInt(req.query.limit) || 200, 500);
+
+        const loggedInUser = await userModel.findOne({ email: req.user.email });
+        const project = await projectModel.findOne({ _id: projectId, users: loggedInUser._id });
+        if (!project) return res.status(403).json({ error: 'Access denied' });
+
+        const msgs = await messageModel
+            .find({ project: projectId })
+            .sort({ createdAt: 1 })
+            .limit(limit)
+            .lean();
+
+        return res.status(200).json({ messages: msgs });
+    } catch (err) {
+        console.error('getMessages error:', err);
+        res.status(500).json({ error: err.message });
+    }
+}
+
+// ── NEW: Delete project (owner only) ─────────────────────────────────────────
+// DELETE /projects/:projectId
+export const deleteProject = async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        const loggedInUser = await userModel.findOne({ email: req.user.email });
+        const project = await projectModel.findOne({ _id: projectId, owner: loggedInUser._id });
+        if (!project) return res.status(403).json({ error: 'Only the project owner can delete this project' });
+
+        await projectModel.deleteOne({ _id: projectId });
+        await messageModel.deleteMany({ project: projectId });
+
+        return res.status(200).json({ message: 'Project deleted' });
+    } catch (err) {
+        console.error('deleteProject error:', err);
+        res.status(500).json({ error: err.message });
     }
 }
