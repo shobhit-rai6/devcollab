@@ -162,6 +162,24 @@ io.on('connection', (socket) => {
         }
     });
 
+    // ── AI message broadcast (from frontend Ollama/Claude path) ─────────────
+    // Persists and rebroadcasts AI-generated messages so all room members see them
+    socket.on('ai-message', async (data) => {
+        if (!data?.message) return;
+        const aiSender = { _id: 'ai', email: 'AI Assistant' };
+        io.to(socket.roomId).emit('project-message', {
+            message:   data.message,
+            sender:    aiSender,
+            timestamp: new Date()
+        });
+        await persistMessage({
+            projectId: socket.roomId,
+            sender:    aiSender,
+            message:   data.message,
+            type:      'ai'
+        });
+    });
+
     // ── File tree sync ────────────────────────────────────────────────────────
     // NEW FEATURE: real-time file tree sync between collaborators
     socket.on('file-tree-update', (data) => {

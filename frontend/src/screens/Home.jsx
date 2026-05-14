@@ -4,7 +4,7 @@ import axios from "../config/axios"
 import { useNavigate } from 'react-router-dom'
 
 const Home = () => {
-    const { user } = useContext(UserContext)
+    const { user, logout } = useContext(UserContext)
     const [isModalOpen, setIsModalOpen] = useState(false)
     const [projectName, setProjectName] = useState('')
     const [projects, setProjects] = useState([])
@@ -489,6 +489,11 @@ const Home = () => {
                                     {user.email}
                                 </div>
                             )}
+                            <button onClick={logout} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '100px', padding: '0.4rem 1rem', fontSize: '0.78rem', color: '#94a3b8', cursor: 'pointer', fontFamily: "'DM Sans',sans-serif", transition: 'all 0.15s ease' }}
+                                onMouseOver={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.1)'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.25)'; e.currentTarget.style.color = '#f87171' }}
+                                onMouseOut={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)'; e.currentTarget.style.color = '#94a3b8' }}>
+                                Sign out
+                            </button>
                         </div>
                     </header>
 
@@ -558,13 +563,15 @@ const Home = () => {
                                             <i className="ri-folder-3-fill"></i>
                                         </div>
                                         <div className="card-actions">
-                                            <button
-                                                className="card-delete-btn"
-                                                onClick={(e) => deleteProject(e, project._id, project.name)}
-                                                title="Delete project"
-                                            >
-                                                <i className="ri-delete-bin-line"></i>
-                                            </button>
+                                            {(project.owner?._id === user?._id || project.owner?.email === user?.email) && (
+                                                <button
+                                                    className="card-delete-btn"
+                                                    onClick={(e) => deleteProject(e, project._id, project.name)}
+                                                    title="Delete project"
+                                                >
+                                                    <i className="ri-delete-bin-line"></i>
+                                                </button>
+                                            )}
                                             <div className="card-arrow">
                                                 <i className="ri-arrow-right-line"></i>
                                             </div>
