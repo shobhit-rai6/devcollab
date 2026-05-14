@@ -5,18 +5,20 @@ let socketInstance = null;
 export const initializeSocket = (projectId) => {
     if (socketInstance) {
         socketInstance.disconnect();
+        socketInstance = null;
     }
 
     const token = localStorage.getItem('token');
-    
-    socketInstance = io({
-        path: '/socket.io',
-        auth: {
-            token: token
-        },
-        query: {
-            projectId
-        },
+    // BUG FIX: io() with no URL argument connects to the page's own origin,
+    // which is correct for same-origin but WRONG when the API is on a different
+    // port/host (e.g. Vite dev on :5173, backend on :3000).
+    // Now we explicitly use VITE_API_URL so it works in all environments.
+    const serverURL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+
+    socketInstance = io(serverURL, {
+        path:       '/socket.io',
+        auth:       { token },
+        query:      { projectId },
         transports: ['websocket', 'polling'],
         withCredentials: true,
         autoConnect: true,
@@ -26,45 +28,37 @@ export const initializeSocket = (projectId) => {
     });
 
     socketInstance.on('connect', () => {
-        console.log('Socket connected successfully with ID:', socketInstance.id);
+        console.log('✅ Socket connected:', socketInstance.id);
     });
-
-    socketInstance.on('connect_error', (error) => {
-        console.error('Socket connection error:', error.message);
+    socketInstance.on('connect_error', (err) => {
+        console.error('❌ Socket connection error:', err.message);
     });
-
     socketInstance.on('disconnect', (reason) => {
-        console.log('Socket disconnected:', reason);
+        console.log('🔌 Socket disconnected:', reason);
     });
 
     return socketInstance;
-}
+};
 
 export const receiveMessage = (eventName, callback) => {
-    if (socketInstance) {
-        socketInstance.off(eventName);
-        socketInstance.on(eventName, (data) => {
-            console.log(`Received ${eventName}:`, data);
-            callback(data);
-        });
-    }
-}
+    if (!socketInstance) return;
+    socketInstance.off(eventName);
+    socketInstance.on(eventName, callback);
+};
 
 export const sendMessage = (eventName, data) => {
-    if (socketInstance) {
-        console.log(`Sending ${eventName}:`, data);
-        socketInstance.emit(eventName, data);
-    } else {
-        console.error('Socket not initialized');
+    if (!socketInstance) {
+        console.error('Socket not initialized — call initializeSocket first');
+        return;
     }
-}
+    socketInstance.emit(eventName, data);
+};
 
 export const disconnectSocket = () => {
     if (socketInstance) {
         socketInstance.disconnect();
         socketInstance = null;
     }
-}
+};
 
-// ✅ EXPORT the socketInstance getter
 export const getSocketInstance = () => socketInstance;

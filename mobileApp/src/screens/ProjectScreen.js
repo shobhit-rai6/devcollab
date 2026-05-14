@@ -2,17 +2,18 @@ import React, { useState, useEffect, useContext, useRef, useCallback } from 'rea
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, Modal, ActivityIndicator, Alert,
-  KeyboardAvoidingView, Platform, ScrollView, Dimensions,
+  KeyboardAvoidingView, Platform, ScrollView,
+  Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { UserContext } from '../context/UserContext';
 import { colors, radius, spacing, shadows } from '../theme';
 import axios from '../config/axios';
 import {
-  initializeSocket, receiveMessage, sendMessage, disconnectSocket,
+  initializeSocket, receiveMessage, sendMessage, disconnectSocket, getSocketInstance,
 } from '../config/socket';
 
-const { width: SCREEN_W } = Dimensions.get('window');
+Dimensions.get('window');
 
 // ─── File Icon helper ─────────────────────────────────────────────────────────
 function fileEmoji(name = '') {
@@ -54,7 +55,7 @@ function AIMessage({ raw }) {
 
 // ─── Chat Message ─────────────────────────────────────────────────────────────
 function ChatMessage({ item, currentUserId }) {
-  const isAI   = item.sender?._id === 'AI' || item.sender?.email === 'AI Assistant';
+  const isAI   = item.sender?._id === 'ai' || item.sender?.email === 'AI Assistant';
   const isMine = item.sender?._id === currentUserId;
 
   if (isAI) return <AIMessage raw={item.message} />;
@@ -217,32 +218,36 @@ export default function ProjectScreen({ route, navigation }) {
   const { project: routeProject } = route.params;
   const { user } = useContext(UserContext);
 
-  const [project,    setProject]    = useState(routeProject);
-  const [messages,   setMessages]   = useState([]);
-  const [message,    setMessage]    = useState('');
-  const [fileTree,   setFileTree]   = useState({});
-  const [currentFile,setCurrentFile]= useState(null);
-  const [users,      setUsers]      = useState([]);
-  const [loading,    setLoading]    = useState(true);
-  const [isAiTyping, setIsAiTyping] = useState(false);
-  const [activeTab,  setActiveTab]  = useState(TAB.CHAT);
-  const [collabModal,setCollabModal]= useState(false);
+  const [project,     setProject]     = useState(routeProject);
+  const [messages,    setMessages]    = useState([]);
+  const [message,     setMessage]     = useState('');
+  const [fileTree,    setFileTree]    = useState({});
+  const [users,       setUsers]       = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [isAiTyping,  setIsAiTyping]  = useState(false);
+  const [activeTab,   setActiveTab]   = useState(TAB.CHAT);
+  const [collabModal, setCollabModal] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [typingUsers, setTypingUsers] = useState(new Set());
+  const [onlineUsers, setOnlineUsers] = useState(new Set());
 
   const flatListRef = useRef(null);
   const socketInit  = useRef(false);
+  const typingTimerRef = useRef(null);
 
   // ── Load project data ────────────────────────────────────────────────────
   useEffect(() => {
     const load = async () => {
       try {
-        const [projRes, usersRes] = await Promise.all([
+        const [projRes, usersRes, msgsRes] = await Promise.all([
           axios.get(`/projects/get-project/${project._id}`),
           axios.get('/users/all'),
+          // Project model has no messages field — fetch from the messages API
+          axios.get(`/projects/${project._id}/messages?limit=200`),
         ]);
         setProject(projRes.data.project);
         setFileTree(projRes.data.project.fileTree || {});
-        setMessages(projRes.data.project.messages || []);
+        setMessages(msgsRes.data.messages || []);
         setUsers(usersRes.data.users || []);
       } catch (e) {
         console.error('Load project error', e);
@@ -259,16 +264,70 @@ export default function ProjectScreen({ route, navigation }) {
     socketInit.current = true;
 
     initializeSocket(project._id).then(() => {
+      // ── Chat messages from other users ─────────────────────────────
       receiveMessage('project-message', (data) => {
-        setMessages(prev => [...prev, data]);
-        // Scroll to bottom
+        const isMine = data.sender?._id === user?._id || data.sender?.email === user?.email;
+        if (!isMine) {
+          setMessages(prev => [...prev, data]);
+          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+        }
+      });
+
+      // ── AI responses received by OTHER collaborators ─────────────────
+      receiveMessage('ai-message', (data) => {
+        setMessages(prev => {
+          const isDupe = prev.some(m =>
+            m.sender?._id === 'ai' &&
+            m.message === data.message &&
+            Math.abs(new Date(m.timestamp || 0) - new Date(data.timestamp || Date.now())) < 2000
+          );
+          if (isDupe) return prev;
+          return [...prev, {
+            sender: { _id: 'ai', email: 'AI Assistant' },
+            message: data.message,
+            timestamp: data.timestamp || new Date(),
+          }];
+        });
         setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
       });
-      receiveMessage('ai-typing', ({ typing }) => setIsAiTyping(typing));
+
+      // ── Typing indicators ──────────────────────────────────────────
+      receiveMessage('user-typing', ({ email }) =>
+        setTypingUsers(prev => new Set([...prev, email]))
+      );
+      receiveMessage('user-stop-typing', ({ email }) => {
+        setTypingUsers(prev => { const s = new Set(prev); s.delete(email); return s; });
+      });
+
+      // ── Online presence ────────────────────────────────────────────
+      receiveMessage('online-count', ({ count }) => {
+        setOnlineUsers(new Set(Array.from({ length: count }, (_, i) => i)));
+      });
+
+      // ── File tree sync from collaborators ───────────────────────────
+      receiveMessage('file-tree-updated', ({ fileTree: ft }) => {
+        if (ft && typeof ft === 'object') {
+          setFileTree(ft);
+        }
+      });
     });
 
     return () => { disconnectSocket(); socketInit.current = false; };
-  }, [project._id]);
+  }, [project._id, user]);
+
+  // ── Handle message input with typing indicators ────────────────────────────
+  const handleMessageChange = useCallback((text) => {
+    setMessage(text);
+    
+    const socket = getSocketInstance();
+    if (socket && user?.email) {
+      socket.emit('typing-start', {});
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = setTimeout(() => {
+        socket.emit('typing-stop', {});
+      }, 2000);
+    }
+  }, [user]);
 
   // ── Send message ─────────────────────────────────────────────────────────
   const handleSend = useCallback(() => {
@@ -282,6 +341,9 @@ export default function ProjectScreen({ route, navigation }) {
     sendMessage('project-message', outgoing);
     setMessages(prev => [...prev, outgoing]);
     setMessage('');
+    clearTimeout(typingTimerRef.current);
+    const socket = getSocketInstance();
+    if (socket) socket.emit('typing-stop', {});
     setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
   }, [message, user]);
 
@@ -324,7 +386,12 @@ export default function ProjectScreen({ route, navigation }) {
         <TouchableOpacity onPress={() => navigation.goBack()} style={s.backBtn}>
           <Text style={s.backBtnText}>←</Text>
         </TouchableOpacity>
-        <Text style={s.projectName} numberOfLines={1}>{project.name}</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={s.projectName} numberOfLines={1}>{project.name}</Text>
+          {onlineUsers.size > 0 && (
+            <Text style={s.onlineCount}>🟢 {onlineUsers.size} online</Text>
+          )}
+        </View>
         <TouchableOpacity style={s.collabBtn} onPress={() => setCollabModal(true)}>
           <Text style={s.collabBtnText}>👥 Add</Text>
         </TouchableOpacity>
@@ -356,7 +423,7 @@ export default function ProjectScreen({ route, navigation }) {
           <FlatList
             ref={flatListRef}
             data={messages}
-            keyExtractor={(_, i) => String(i)}
+            keyExtractor={(item, i) => item._id || String(i)}
             renderItem={({ item }) => (
               <ChatMessage item={item} currentUserId={user._id} />
             )}
@@ -370,12 +437,20 @@ export default function ProjectScreen({ route, navigation }) {
               </View>
             }
             ListFooterComponent={
-              isAiTyping ? (
-                <View style={s.typingIndicator}>
-                  <ActivityIndicator color={colors.indigo} size="small" />
-                  <Text style={s.typingText}>AI is thinking…</Text>
-                </View>
-              ) : null
+              <>
+                {isAiTyping && (
+                  <View style={s.typingIndicator}>
+                    <ActivityIndicator color={colors.indigo} size="small" />
+                    <Text style={s.typingText}>AI is thinking…</Text>
+                  </View>
+                )}
+                {typingUsers.size > 0 && (
+                  <View style={s.typingIndicator}>
+                    <ActivityIndicator color={colors.secondary} size="small" />
+                    <Text style={s.typingText}>{Array.from(typingUsers).join(', ')} is typing…</Text>
+                  </View>
+                )}
+              </>
             }
           />
 
@@ -386,7 +461,7 @@ export default function ProjectScreen({ route, navigation }) {
               placeholder="Message… or @ai ask something"
               placeholderTextColor={colors.textDimmed}
               value={message}
-              onChangeText={setMessage}
+              onChangeText={handleMessageChange}
               multiline
               returnKeyType="send"
               blurOnSubmit={false}
@@ -468,6 +543,7 @@ const s = StyleSheet.create({
   backBtn: { width: 34, height: 34, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
   backBtnText: { color: colors.textPrimary, fontSize: 18, lineHeight: 22 },
   projectName: { flex: 1, fontSize: 16, fontWeight: '700', color: colors.textPrimary },
+  onlineCount: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   collabBtn: { backgroundColor: 'rgba(99,102,241,0.12)', borderRadius: radius.full, paddingVertical: 6, paddingHorizontal: 12, borderWidth: 1, borderColor: 'rgba(99,102,241,0.25)' },
   collabBtnText: { color: colors.indigo, fontSize: 12, fontWeight: '600' },
 

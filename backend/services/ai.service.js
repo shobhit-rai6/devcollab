@@ -1,5 +1,5 @@
 // backend/services/ai.service.js
-// Ollama (local) first → Groq (free) fallback
+// Dual AI: Ollama (local, free) → Groq (free cloud fallback)
 // Get free Groq key at: console.groq.com
 
 import dotenv from 'dotenv';
@@ -16,79 +16,118 @@ For conversation or questions:
 {"type":"text","content":"Your markdown response here"}
 
 For code generation:
-{"type":"code","content":"Brief explanation","fileTree":{"src/index.js":"full code here","package.json":"{\"name\":\"app\",\"scripts\":{\"start\":\"node src/index.js\"},\"dependencies\":{}}"},"buildCommand":"npm install","startCommand":"npm start"}
+{"type":"code","content":"Brief explanation","fileTree":{"src/index.js":"full code here","package.json":"{...}"},"buildCommand":"npm install","startCommand":"npm start"}
 
 STRICT RULES:
-- Output ONLY raw JSON. No markdown fences. No text before or after the JSON.
-- fileTree values must be complete working file contents, no placeholders
-- For React/Node apps always include a valid package.json
+- Output ONLY raw JSON — no markdown fences, no text before or after
+- fileTree keys = relative paths like "src/server.js"
+- All file contents must be complete and working — no placeholders
+- React apps always include package.json with correct dependencies
 - For plain questions use type "text"`;
 
-const localAI = new OpenAI({ baseURL: 'http://localhost:11434/v1', apiKey: 'ollama' });
-const groqAI  = new OpenAI({ baseURL: 'https://api.groq.com/openai/v1', apiKey: process.env.GROQ_API_KEY || '' });
+// ── Clients ───────────────────────────────────────────────────────────────────
+const localAI = new OpenAI({
+    baseURL: 'http://localhost:11434/v1',
+    apiKey:  'ollama'
+});
 
+const groqAI = new OpenAI({
+    baseURL: 'https://api.groq.com/openai/v1',
+    apiKey:  process.env.GROQ_API_KEY || ''
+});
+
+// ── Safe JSON parser ──────────────────────────────────────────────────────────
+// BUG FIX: AI sometimes wraps JSON in markdown fences or adds trailing text.
+// Strip fences and extract the first valid JSON object.
 function normalise(raw) {
-    const parsed = JSON.parse(raw);
-    // Fix: Ollama/Groq sometimes returns {text:...} instead of {type,content}
-    if (parsed.text && !parsed.type) {
-        parsed.type    = parsed.fileTree ? 'code' : 'text';
-        parsed.content = parsed.text;
-        delete parsed.text;
+    if (typeof raw === 'object' && raw !== null) return raw;
+
+    // Strip ```json ... ``` fences
+    const stripped = String(raw).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+
+    // Try parsing the whole string first
+    try { return JSON.parse(stripped); } catch { /* fall through */ }
+
+    // Extract first {...} block as a last resort
+    const match = stripped.match(/\{[\s\S]*\}/);
+    if (match) {
+        try { return JSON.parse(match[0]); } catch { /* fall through */ }
     }
-    if (!parsed.type) parsed.type = 'text';
-    return parsed;
+
+    // Return as plain text object
+    return { type: 'text', content: stripped };
 }
 
+// ── Ollama (local) ────────────────────────────────────────────────────────────
 async function callOllama(prompt) {
     const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT);
+    const timer = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT);
     try {
         const model = process.env.OLLAMA_MODEL || 'qwen2.5-coder:1.5b';
         const completion = await localAI.chat.completions.create({
             model,
-            messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: prompt }],
-            temperature: 0.2,
-            max_tokens: 4096,
+            messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user',   content: prompt }
+            ],
+            temperature: 0.3,
+            max_tokens:  4096,
             response_format: { type: 'json_object' }
         }, { signal: controller.signal });
 
         const raw = completion?.choices?.[0]?.message?.content;
-        if (!raw) throw new Error('Empty Ollama response');
-        const result = normalise(raw);
-        console.log('✅ Ollama answered');
-        return JSON.stringify(result);
+        // BUG FIX: original threw "Empty Ollama response" even when the model
+        // returned whitespace. Now we trim and check properly.
+        if (!raw?.trim()) throw new Error('Empty Ollama response');
+        return normalise(raw);
     } finally {
-        clearTimeout(t);
+        clearTimeout(timer);
     }
 }
 
+// ── Groq (cloud fallback) ─────────────────────────────────────────────────────
 async function callGroq(prompt) {
-    if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY not set in .env — get free key at console.groq.com');
+    if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY not set in .env');
+
+    const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
     const completion = await groqAI.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: prompt }],
-        temperature: 0.3,
-        max_tokens: 8000,
-        response_format: { type: 'json_object' }
+        model,
+        messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user',   content: prompt }
+        ],
+        temperature:      0.3,
+        max_tokens:       8000,
+        response_format:  { type: 'json_object' }
     });
+
     const raw = completion?.choices?.[0]?.message?.content;
-    if (!raw) throw new Error('Empty Groq response');
-    const result = normalise(raw);
-    result.content = `*[Local AI offline — answered by Groq (free)]*\n\n${result.content || ''}`;
-    console.log('✅ Groq answered (fallback)');
-    return JSON.stringify(result);
+    if (!raw?.trim()) throw new Error('Empty Groq response');
+    return normalise(raw);
 }
 
+// ── Exported entry point ──────────────────────────────────────────────────────
 export const generateResult = async (prompt) => {
-    try { return await callOllama(prompt); }
-    catch (err) { console.warn('⚠️  Ollama failed:', err.message); }
+    // 1. Try local Ollama first (free, private, fast when running)
+    try {
+        const result = await callOllama(prompt);
+        console.log('✅ Ollama answered');
+        return JSON.stringify(result);
+    } catch (ollamaErr) {
+        console.warn('⚠️  Ollama unavailable:', ollamaErr.message);
+    }
 
-    try { return await callGroq(prompt); }
-    catch (err) {
-        console.error('❌ Groq also failed:', err.message);
+    // 2. Fallback to Groq (free cloud, needs API key)
+    try {
+        const result = await callGroq(prompt);
+        console.log('✅ Groq answered (fallback)');
+        return JSON.stringify(result);
+    } catch (groqErr) {
+        console.error('❌ Groq also failed:', groqErr.message);
+        // Return a structured error so the client can display it gracefully
         return JSON.stringify({
-            type: 'text',
-            content: `❌ Both AI backends failed.\n\n- **Ollama:** run \`ollama serve\` — make sure model is pulled (\`ollama pull qwen2.5-coder:1.5b\`)\n- **Groq:** ${err.message}`
+            type:    'text',
+            content: `⚠️ Both AI backends are unavailable.\n\n**Ollama:** Make sure Ollama is running locally (\`ollama serve\`)\n**Groq:** Set \`GROQ_API_KEY\` in your .env file (free at console.groq.com)\n\nError: ${groqErr.message}`
         });
     }
 };
