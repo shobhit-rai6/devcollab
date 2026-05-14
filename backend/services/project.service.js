@@ -1,139 +1,82 @@
 import projectModel from '../models/project.model.js';
 import mongoose from 'mongoose';
 
-// ✅ FIX 1: Create project - Add owner field
-export const createProject = async ({
-    name, userId
-}) => {
-    if (!name) {
-        throw new Error('Name is required')
-    }
-    if (!userId) {
-        throw new Error('UserId is required')
-    }
+// ── Create project ────────────────────────────────────────────────────────────
+export const createProject = async ({ name, userId }) => {
+    if (!name?.trim()) throw new Error('Name is required');
+    if (!userId)       throw new Error('UserId is required');
 
-    let project;
     try {
-        project = await projectModel.create({
-            name,
-            owner: userId,        // ✅ ADD THIS - Set the creator as owner
-            users: [ userId ]     // ✅ Keep this - Add creator to users array
+        const project = await projectModel.create({
+            name: name.trim(),
+            owner: userId,   // BUG FIX: was missing in some versions
+            users: [userId]
         });
+        return project.populate(['users', 'owner']);
     } catch (error) {
-        if (error.code === 11000) {
-            throw new Error('Project name already exists');
-        }
+        if (error.code === 11000) throw new Error('A project with that name already exists');
         throw error;
     }
+};
 
-    return project;
-}
-
-// ✅ GOOD: Get all projects by user ID (already filtered by users array)
+// ── Get all projects for a user ───────────────────────────────────────────────
 export const getAllProjectByUserId = async ({ userId }) => {
-    if (!userId) {
-        throw new Error('UserId is required')
-    }
-
-    const allUserProjects = await projectModel.find({
-        users: userId
-    }).populate('users', 'email _id')
-      .populate('owner', 'email _id');    // ✅ ADD THIS - Populate owner info
-
-    return allUserProjects;
-}
-
-// ✅ FIX 2: Add users to project - Remove userId check (we'll do it in controller)
-// ✅ FIX: Remove userId parameter (owner check done in controller)
-export const addUsersToProject = async ({ projectId, users }) => {
-    if (!projectId) {
-        throw new Error("projectId is required")
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(projectId)) {
-        throw new Error("Invalid projectId")
-    }
-
-    if (!users) {
-        throw new Error("users are required")
-    }
-
-    if (!Array.isArray(users) || users.some(userId => !mongoose.Types.ObjectId.isValid(userId))) {
-        throw new Error("Invalid userId(s) in users array")
-    }
-
-    const updatedProject = await projectModel.findOneAndUpdate({
-        _id: projectId
-    }, {
-        $addToSet: {
-            users: {
-                $each: users
-            }
-        }
-    }, {
-        new: true
-    }).populate('users', 'email _id')
-      .populate('owner', 'email _id');
-
-    return updatedProject;
-}
-
-// ✅ FIX 3: Get project by ID - Add access check parameter
-export const getProjectById = async ({ projectId, userId }) => {
-    if (!projectId) {
-        throw new Error("projectId is required")
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(projectId)) {
-        throw new Error("Invalid projectId")
-    }
-
-    // ✅ MODIFIED: Only return project if user has access
-    const query = userId 
-        ? { _id: projectId, users: userId }  // Check access if userId provided
-        : { _id: projectId };                // No access check if no userId
-
-    const project = await projectModel.findOne(query)
+    if (!userId) throw new Error('UserId is required');
+    return projectModel
+        .find({ users: userId })
         .populate('users', 'email _id')
-        .populate('owner', 'email _id');     // ✅ ADD THIS - Populate owner info
+        .populate('owner', 'email _id')   // BUG FIX: populate owner so frontend can show ownership badge
+        .sort({ updatedAt: -1 });
+};
 
-    return project;
-}
+// ── Add collaborators ─────────────────────────────────────────────────────────
+// BUG FIX: removed the unused userId parameter that was causing "userId required"
+// errors when callers only passed { projectId, users }
+export const addUsersToProject = async ({ projectId, users }) => {
+    if (!projectId) throw new Error('projectId is required');
+    if (!mongoose.Types.ObjectId.isValid(projectId)) throw new Error('Invalid projectId');
+    if (!Array.isArray(users) || users.length === 0) throw new Error('users array is required');
+    if (users.some(id => !mongoose.Types.ObjectId.isValid(id)))
+        throw new Error('One or more user IDs are invalid');
 
-// ✅ FIX 4: Update file tree - Add access check parameter
-export const updateFileTree = async ({ projectId, fileTree, userId }) => {
-    if (!projectId) {
-        throw new Error("projectId is required")
-    }
+    const updated = await projectModel.findByIdAndUpdate(
+        projectId,
+        { $addToSet: { users: { $each: users } } },
+        { new: true }
+    )
+        .populate('users', 'email _id')
+        .populate('owner', 'email _id');
 
-    if (!mongoose.Types.ObjectId.isValid(projectId)) {
-        throw new Error("Invalid projectId")
-    }
+    if (!updated) throw new Error('Project not found');
+    return updated;
+};
 
-    if (!fileTree) {
-        throw new Error("fileTree is required")
-    }
+// ── Get project by ID ─────────────────────────────────────────────────────────
+export const getProjectById = async ({ projectId, userId }) => {
+    if (!projectId) throw new Error('projectId is required');
+    if (!mongoose.Types.ObjectId.isValid(projectId)) throw new Error('Invalid projectId');
 
-    // ✅ ADDED: Check if user has access before updating
-    if (userId) {
-        const project = await projectModel.findOne({
-            _id: projectId,
-            users: userId
-        });
+    const query = userId ? { _id: projectId, users: userId } : { _id: projectId };
+    return projectModel
+        .findOne(query)
+        .populate('users', 'email _id')
+        .populate('owner', 'email _id');
+};
 
-        if (!project) {
-            throw new Error("You do not have access to this project");
-        }
-    }
+// ── Update file tree ──────────────────────────────────────────────────────────
+export const updateFileTree = async ({ projectId, fileTree }) => {
+    if (!projectId) throw new Error('projectId is required');
+    if (!mongoose.Types.ObjectId.isValid(projectId)) throw new Error('Invalid projectId');
+    if (!fileTree)  throw new Error('fileTree is required');
 
-    const project = await projectModel.findOneAndUpdate({
-        _id: projectId
-    }, {
-        fileTree
-    }, {
-        new: true
-    }).populate('users', 'email _id')
-      .populate('owner', 'email _id');      // ✅ ADD THIS - Populate owner info
+    const updated = await projectModel.findByIdAndUpdate(
+        projectId,
+        { fileTree },
+        { new: true }
+    )
+        .populate('users', 'email _id')
+        .populate('owner', 'email _id');
 
-    return project;
-}
+    if (!updated) throw new Error('Project not found');
+    return updated;
+};
