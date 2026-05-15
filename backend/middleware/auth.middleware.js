@@ -5,10 +5,12 @@ export const authUser = async (req, res, next) => {
     try {
         // BUG FIX: original code crashed with TypeError when req.headers.authorization
         // was undefined because it called .split(' ') unconditionally.
-        let token = req.cookies?.token;
-        if (!token && req.headers.authorization?.startsWith('Bearer ')) {
+        // Authorization header takes priority over cookie to avoid stale-cookie 401 loops
+        let token = null;
+        if (req.headers.authorization?.startsWith('Bearer ')) {
             token = req.headers.authorization.split(' ')[1];
         }
+        if (!token) token = req.cookies?.token;
 
         if (!token) {
             return res.status(401).json({ error: 'Unauthorized: no token provided' });
