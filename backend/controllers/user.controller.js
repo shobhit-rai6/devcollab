@@ -8,30 +8,32 @@ import redisClient from '../services/redis.service.js';
 // ── Register ──────────────────────────────────────────────────────────────────
 export const createUserController = async (req, res) => {
     const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    if (!errors.isEmpty()) return res.status(400).json({ message: errors.array()[0].msg });
     try {
         const user = await userService.createUser(req.body);
         const token = user.generateJWT();
-        // BUG FIX: mutate _doc copy so we don't expose password in response
         const userObj = user.toObject();
         delete userObj.password;
         res.status(201).json({ user: userObj, token });
     } catch (error) {
-        res.status(400).send(error.message);
+        const message = error.code === 11000
+            ? 'An account with this email already exists'
+            : error.message;
+        res.status(400).json({ message });
     }
 };
 
 // ── Login ─────────────────────────────────────────────────────────────────────
 export const loginController = async (req, res) => {
     const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    if (!errors.isEmpty()) return res.status(400).json({ message: errors.array()[0].msg });
     try {
         const { email, password } = req.body;
         const user = await userModel.findOne({ email }).select('+password');
-        if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!user) return res.status(401).json({ message: 'Invalid credentials' });
 
         const isMatch = await user.isValidPassword(password);
-        if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!isMatch) return res.status(401).json({ message: 'Invalid credentials' });
 
         const token = user.generateJWT();
         const userObj = user.toObject();
@@ -39,7 +41,7 @@ export const loginController = async (req, res) => {
         res.status(200).json({ user: userObj, token });
     } catch (err) {
         console.error('loginController:', err.message);
-        res.status(400).send(err.message);
+        res.status(400).json({ message: err.message });
     }
 };
 
