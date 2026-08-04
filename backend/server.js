@@ -6,7 +6,6 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import projectModel from './models/project.model.js';
 import messageModel from './models/message.model.js';
-import { generateResult } from './services/ai.service.js';
 
 const port = process.env.PORT || 3000;
 const server = http.createServer(app);
@@ -60,16 +59,6 @@ async function persistMessage({ projectId, sender, message, type = 'user' }) {
     }
 }
 
-// ── Safe JSON parse helper ────────────────────────────────────────────────────
-// BUG FIX: ai.controller.js did JSON.parse(result) but result was already an
-// object when generateResult returns parsed JSON — this caused a crash.
-// We now safely handle both string and object returns from AI service.
-function safeParseAI(raw) {
-    if (typeof raw === 'object' && raw !== null) return raw;
-    try { return JSON.parse(raw); }
-    catch { return { type: 'text', content: String(raw) }; }
-}
-
 // ── Connection handler ────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
     console.log('✅ User connected:', socket.user?.email);
@@ -117,46 +106,11 @@ io.on('connection', (socket) => {
             // Persist user message
             await persistMessage({ projectId: socket.roomId, sender, message: userMsg, type: 'user' });
 
-            // ── Handle @ai mention ────────────────────────────────────────────
-            if (userMsg.toLowerCase().includes('@ai')) {
-                // Emit AI typing indicator
-                io.to(socket.roomId).emit('ai-typing', { typing: true });
-
-                try {
-                    const rawResult = await generateResult(userMsg);
-                    // BUG FIX: safeParseAI handles both string and object returns
-                    const parsed    = safeParseAI(rawResult);
-                    const aiMessage = JSON.stringify(parsed);
-
-                    const aiSender = { _id: 'ai', email: 'AI Assistant' };
-
-                    io.to(socket.roomId).emit('project-message', {
-                        message:   aiMessage,
-                        sender:    aiSender,
-                        timestamp: new Date()
-                    });
-
-                    await persistMessage({
-                        projectId: socket.roomId,
-                        sender:    aiSender,
-                        message:   aiMessage,
-                        type:      'ai'
-                    });
-                } catch (aiErr) {
-                    console.error('AI generation error:', aiErr.message);
-                    const errMsg = JSON.stringify({
-                        type:    'text',
-                        content: `⚠️ AI error: ${aiErr.message}`
-                    });
-                    io.to(socket.roomId).emit('project-message', {
-                        message:   errMsg,
-                        sender:    { _id: 'ai', email: 'AI Assistant' },
-                        timestamp: new Date()
-                    });
-                } finally {
-                    io.to(socket.roomId).emit('ai-typing', { typing: false });
-                }
-            }
+            // NOTE: @ai generation is NOT handled here. The frontend's
+            // AIAssistant (ai.helper.js) already calls the AI and broadcasts
+            // the reply via the 'ai-message' event below — generating a
+            // second reply here as well used to cause every @ai prompt to
+            // produce two duplicate AI responses.
         } catch (err) {
             console.error('project-message handler error:', err.message);
         }
