@@ -10,8 +10,13 @@ connect();
 
 const app = express();
 
+// Some env sources (Render's dashboard, Docker --env-file) don't strip stray
+// whitespace/quotes the way Node's dotenv does — an untrimmed value here
+// crashes cors' res.setHeader with ERR_INVALID_CHAR.
+const clientUrl = (process.env.CLIENT_URL || 'http://localhost:5173').trim().replace(/^["']|["']$/g, '');
+
 app.use(cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    origin: clientUrl,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
