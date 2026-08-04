@@ -10,9 +10,13 @@ import messageModel from './models/message.model.js';
 const port = process.env.PORT || 3000;
 const server = http.createServer(app);
 
+// Some env sources don't strip stray whitespace/quotes the way dotenv does —
+// an untrimmed value here crashes socket.io's cors handling the same way.
+const clientUrl = (process.env.CLIENT_URL || 'http://localhost:5173').trim().replace(/^["']|["']$/g, '');
+
 const io = new Server(server, {
     cors: {
-        origin: process.env.CLIENT_URL || 'http://localhost:5173',
+        origin: clientUrl,
         methods: ['GET', 'POST'],
         credentials: true,
         allowedHeaders: ['Authorization', 'Content-Type']
