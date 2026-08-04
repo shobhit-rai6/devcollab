@@ -11,7 +11,7 @@ import {
 } from '../config/socket'
 import Markdown from 'markdown-to-jsx'
 import hljs from 'highlight.js'
-import { getWebContainer } from '../config/webcontainer'
+import { getWebContainer } from '../config/webContainer'
 import 'highlight.js/styles/atom-one-dark.css'
 import 'remixicon/fonts/remixicon.css'
 import { AIAssistant, downloadProjectAsZip } from '../helper/ai.helper'
