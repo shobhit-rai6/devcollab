@@ -11,11 +11,11 @@ export const UserProvider = ({ children }) => {
     const [loading, setLoading] = useState(true); // ✅ Add loading state
     const navigate = useNavigate();
 
-    // ✅ Load user from localStorage on initial render
+    // ✅ Load user from sessionStorage on initial render
     useEffect(() => {
         const loadUser = () => {
-            const token = localStorage.getItem('token');
-            const storedUser = localStorage.getItem('user');
+            const token = sessionStorage.getItem('token');
+            const storedUser = sessionStorage.getItem('user');
             
             if (token && storedUser) {
                 setUser(JSON.parse(storedUser));
@@ -28,23 +28,23 @@ export const UserProvider = ({ children }) => {
 
     // LOGIN FUNCTION
     const login = (userData, token) => {
-        localStorage.setItem('token', token);
-        localStorage.setItem('user', JSON.stringify(userData));
+        sessionStorage.setItem('token', token);
+        sessionStorage.setItem('user', JSON.stringify(userData));
         setUser(userData);
     };
 
     // LOGOUT FUNCTION
     const logout = async () => {
         try {
-            const token = localStorage.getItem('token');
+            const token = sessionStorage.getItem('token');
             if (token) {
                 await axios.get('/users/logout');
             }
         } catch (error) {
             console.error('Logout error:', error);
         } finally {
-            localStorage.removeItem('token');
-            localStorage.removeItem('user');
+            sessionStorage.removeItem('token');
+            sessionStorage.removeItem('user');
             setUser(null);
             navigate('/login');
         }

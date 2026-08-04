@@ -9,7 +9,7 @@ const axiosInstance = axios.create({
 // Attach token to every request
 axiosInstance.interceptors.request.use(
     (config) => {
-        const token = localStorage.getItem('token');
+        const token = sessionStorage.getItem('token');
         if (token) config.headers.Authorization = `Bearer ${token}`;
         return config;
     },
@@ -25,9 +25,9 @@ axiosInstance.interceptors.response.use(
             // which caused an infinite redirect loop when the login request
             // itself returned 401 (wrong password). Now we only redirect if
             // the user was previously authenticated.
-            const hadToken = !!localStorage.getItem('token');
-            localStorage.removeItem('token');
-            localStorage.removeItem('user');
+            const hadToken = !!sessionStorage.getItem('token');
+            sessionStorage.removeItem('token');
+            sessionStorage.removeItem('user');
             if (hadToken && !window.location.pathname.includes('/login')) {
                 window.location.href = '/login';
             }

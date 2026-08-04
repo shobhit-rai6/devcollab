@@ -1,35 +1,7 @@
-// ai.helper.js — Dual AI: Ollama (local) first → Claude via backend proxy
+// ai.helper.js — AI assistant, calls the backend AI proxy
 // Drop this into: frontend/src/helper/ai.helper.js
 
-import OpenAI from 'openai';
 import axios from '../config/axios'; // your existing axios instance (has auth token)
-
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
-const OLLAMA_BASE_URL = 'http://localhost:11434/v1';
-const OLLAMA_MODEL    = 'qwen2.5-coder:1.5b';
-const OLLAMA_TIMEOUT  = 8000; // ms — if local AI is slow/offline, fall back to backend
-
-function buildSystemPrompt(fileTree = {}) {
-    const files = Object.keys(fileTree);
-    return `You are an expert full-stack developer AI assistant in DevCollab, a collaborative code editor.
-
-Current project files: ${files.length > 0 ? files.join(', ') : 'none yet'}
-
-## ALWAYS respond with valid JSON in ONE of these formats:
-
-### For conversation/questions:
-{"type":"text","content":"Your response in markdown. Use **bold**, \`code\`, \`\`\`lang blocks\`\`\`."}
-
-### For code generation:
-{"type":"code","content":"Explanation of what was built.","fileTree":{"src/index.js":"full code here","package.json":"{...}"},"buildCommand":"npm install","startCommand":"npm start"}
-
-## Rules:
-- fileTree keys = relative paths like "src/server.js", "components/Button.jsx"
-- All file contents must be COMPLETE and working — no placeholders
-- React apps: always include package.json with correct dependencies
-- Output ONLY raw JSON — no markdown fences, no extra text outside JSON
-- Normal questions (not code): use type "text"`;
-}
 
 // ─── PATH UTILITIES ───────────────────────────────────────────────────────────
 
@@ -181,13 +153,6 @@ export class AIAssistant {
         this.broadcastAIMessage  = broadcastAIMessage;
         this.isProcessing        = false;
         this.conversationHistory = [];
-
-        // Local Ollama client (browser → localhost, no CORS issue)
-        this.ollama = new OpenAI({
-            baseURL: OLLAMA_BASE_URL,
-            apiKey: 'ollama',
-            dangerouslyAllowBrowser: true,
-        });
     }
 
     // ── ENTRY POINT ───────────────────────────────────────────────────────────
@@ -203,22 +168,11 @@ export class AIAssistant {
         this.conversationHistory.push({ role: 'user', content: userMessage });
         this.addMessage(this._msg({ type: 'text', content: '🤔 Thinking…' }));
 
-        let parsed      = null;
-        let usedFallback = false;
+        let parsed = null;
 
         try {
-            // ── 1. Try local Ollama (browser → localhost:11434) ───────────
-            try {
-                parsed = await this._callOllama(userMessage);
-                console.log('[ai.helper] ✅ Ollama answered');
-            } catch (ollamaErr) {
-                console.warn('[ai.helper] ⚠️ Ollama unavailable, trying backend proxy…', ollamaErr.message);
-                usedFallback = true;
-
-                // ── 2. Fallback: browser → Express server → Claude API ────
-                parsed = await this._callBackendAI(userMessage);
-                console.log('[ai.helper] ✅ Backend AI (Claude) answered');
-            }
+            parsed = await this._callBackendAI(userMessage);
+            console.log('[ai.helper] ✅ Backend AI answered');
 
             if (this.removeMessage) this.removeMessage();
 
@@ -238,43 +192,14 @@ export class AIAssistant {
             }
         } catch (err) {
             if (this.removeMessage) this.removeMessage();
-            this.addMessage(this._msg({ type: 'text', content: this._errMsg(err, usedFallback) }));
+            this.addMessage(this._msg({ type: 'text', content: this._errMsg(err) }));
             console.error('[ai.helper] AI error:', err);
         } finally {
             this.isProcessing = false;
         }
     }
 
-    // ── LOCAL OLLAMA (direct browser → localhost, works fine) ────────────────
-    async _callOllama(userMessage) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT);
-
-        try {
-            const completion = await this.ollama.chat.completions.create(
-                {
-                    model: OLLAMA_MODEL,
-                    messages: [
-                        { role: 'system', content: buildSystemPrompt(this.fileTreeRef?.current || {}) },
-                        ...this._history(5),
-                        { role: 'user', content: userMessage },
-                    ],
-                    temperature:     0.7,
-                    max_tokens:      4096,
-                    response_format: { type: 'json_object' },
-                },
-                { signal: controller.signal }
-            );
-
-            const raw = completion?.choices?.[0]?.message?.content;
-            if (!raw) throw new Error('Empty Ollama response');
-            return JSON.parse(raw);
-        } finally {
-            clearTimeout(timer);
-        }
-    }
-
-    // ── BACKEND PROXY (browser → Express server → Claude API) ────────────────
+    // ── BACKEND PROXY (browser → Express server → Groq API) ──────────────────
     // API key lives in backend .env — never exposed to the browser.
     async _callBackendAI(userMessage) {
         const contextPrompt = this._history(8)
@@ -389,22 +314,20 @@ export class AIAssistant {
             .filter(m => m.content);
     }
 
-    _errMsg(err, usedFallback) {
+    _errMsg(err) {
         const m = err?.message || '';
-        if (m.includes('ANTHROPIC_API_KEY'))
-            return '❌ Claude API key not configured. Add `ANTHROPIC_API_KEY=your_key` to backend `.env`';
+        if (m.includes('GROQ_API_KEY'))
+            return '❌ Groq API key not configured. Add `GROQ_API_KEY=your_key` to backend `.env`';
         if (m.includes('401'))
-            return '❌ Claude API key is invalid. Check `ANTHROPIC_API_KEY` in backend `.env`';
+            return '❌ Groq API key is invalid. Check `GROQ_API_KEY` in backend `.env`';
         if (m.includes('429'))
-            return '⏳ Claude API rate limit hit. Wait a moment and try again.';
+            return '⏳ Groq API rate limit hit. Wait a moment and try again.';
         if (m.includes('timeout') || m.includes('ECONNABORTED'))
             return '⌛ AI request timed out. Try a simpler prompt or check your connection.';
         if (m.includes('Network Error') || m.includes('ECONNREFUSED'))
             return '❌ Cannot reach the backend server. Is it running on port 3000?';
         if (m.includes('invalid file name') || m.includes('Invalid key') || m.includes('EIO'))
             return `❌ AI returned an invalid file path that WebContainer rejected. Try rephrasing your request. (${m})`;
-        if (usedFallback)
-            return `❌ Local AI (Ollama) is offline AND the Claude fallback failed: ${m}`;
         return `❌ AI error: ${m}`;
     }
 
