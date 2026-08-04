@@ -8,7 +8,7 @@ export const initializeSocket = (projectId) => {
         socketInstance = null;
     }
 
-    const token = localStorage.getItem('token');
+    const token = sessionStorage.getItem('token');
     // BUG FIX: io() with no URL argument connects to the page's own origin,
     // which is correct for same-origin but WRONG when the API is on a different
     // port/host (e.g. Vite dev on :5173, backend on :3000).
